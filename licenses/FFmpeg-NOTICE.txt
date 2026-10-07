@@ -1,0 +1,5 @@
+Qt Multimedia includes dynamically loaded FFmpeg libraries. Copyright (c) 2000-2023 the FFmpeg developers.
+License: LGPL 2.1 or later. See LGPL-2.1.txt.
+Upstream source: https://ffmpeg.org/download.html
+Qt FFmpeg build scripts: https://code.qt.io/cgit/qt/qtmultimedia.git/tree/config.tests/ffmpeg
+Qt attribution: https://doc.qt.io/qt-6/qtmultimedia-attribution-ffmpeg.html

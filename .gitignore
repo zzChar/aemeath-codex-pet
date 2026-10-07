@@ -1,0 +1,13 @@
+work/
+dist/
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.spec
+.env
+.env.*
+verification*/
+state.json
+pending-completions.json
+error.log
