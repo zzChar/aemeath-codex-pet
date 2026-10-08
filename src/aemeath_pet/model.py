@@ -10,13 +10,14 @@ DEFAULT_SETTINGS = {
     "sound": True, "sound_volume": 85, "scale": 1.3, "position": None, "codex_path": "",
     "idle_min": 22, "idle_max": 45,
     "task_activity": True,
+    "work_reports": True, "progress_reports": True,
 }
 
 def load_settings(path):
     settings = DEFAULT_SETTINGS.copy()
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8")).get("settings", {})
-        for key in ("gaze", "auto_idle", "hover_quota", "task_notifications", "sound", "task_activity"):
+        for key in ("gaze", "auto_idle", "hover_quota", "task_notifications", "sound", "task_activity", "work_reports", "progress_reports"):
             if isinstance(raw.get(key), bool):
                 settings[key] = raw[key]
         for key, low, high in (("sound_volume",0,100),("scale", .8, 2), ("gaze_radius", 80, 600), ("idle_min", 10, 120), ("idle_max", 15, 180)):
@@ -51,14 +52,15 @@ class CompletionReminder:
             raw=json.loads(self.path.read_text(encoding='utf-8'))
             for item in raw if isinstance(raw,list) else []:
                 if isinstance(item,dict) and all(isinstance(item.get(k),str) and item[k] for k in ('thread_id','turn_id','title')):
-                    self.add(item['thread_id'],item['turn_id'],item['title'],save=False)
+                    self.add(item['thread_id'],item['turn_id'],item['title'],save=False,summary=item.get('summary',''))
         except (OSError,ValueError,TypeError):pass
 
-    def add(self,thread_id,turn_id,title,save=True):
+    def add(self,thread_id,turn_id,title,save=True,summary=''):
         if any(i['thread_id']==thread_id and i['turn_id']==turn_id for i in self.items):return False
         # Opening the latest result in a thread also covers its older results.
         self.items=[i for i in self.items if i['thread_id']!=thread_id]
         self.items.append({'thread_id':thread_id,'turn_id':turn_id,'title':title or 'Codex 任务'})
+        if isinstance(summary,str) and summary:self.items[-1]['summary']=summary[:601]
         if save:self.save()
         return True
 

@@ -16,6 +16,7 @@ from .model import load_settings, save_settings, gaze_direction, GazeActivity, A
 from .input_state import WindowsInputObserver, InputState
 from .codex import AccountRPC, TaskMonitor, locate_codex
 from .navigation import thread_url, focus_codex
+from .reports import excerpt
 
 STYLE="""
 QWidget { font-family:'Microsoft YaHei UI'; font-size:12px; color:#e9e4f5; }
@@ -72,7 +73,7 @@ class CodexWorker(QThread):
         while not self.stopping.is_set():
             try:
                 events,active=self.monitor.poll()
-                self.tasks.emit({"status":self.monitor.status,"events":events,"active":active,"phase":self.monitor.phase})
+                self.tasks.emit({"status":self.monitor.status,"events":events,"active":active,"phase":self.monitor.phase,"recent_tasks":self.monitor.recent_tasks})
             except Exception:
                 self.tasks.emit({"status":"任务状态暂不可用","events":[],"active":[]})
             self.stopping.wait(1)
@@ -216,6 +217,9 @@ class QuotaPopup(CrystalPopup):
         self.stamp=QLabel("每分钟自动更新")
         self.stamp.setObjectName("muted")
         footer.addWidget(self.stamp);footer.addStretch()
+        report_button=QPushButton('工作报告');report_button.setFixedSize(80,26)
+        report_button.setStyleSheet('QPushButton{padding:0;border:0;background:transparent;color:#ffd2e7;}')
+        report_button.clicked.connect(pet.show_work_report);footer.addWidget(report_button)
         self.refresh_button=QPushButton("刷新")
         self.refresh_button.setFixedSize(47,26)
         self.refresh_button.setStyleSheet("QPushButton{padding:0;border:1px solid #5b5274;background:#352a47;border-radius:7px;color:#d5c7e5;} QPushButton:hover{border-color:#9ddfec;}")
@@ -266,25 +270,43 @@ class NoticePopup(CrystalPopup):
         self.show();self.timer.start(duration)
 
 class CompletionPopup(CrystalPopup):
-    def __init__(self,pet):
-        super().__init__();self.pet=pet;self.setFixedWidth(300)
+    def __init__(self,pet,completion=True):
+        super().__init__();self.pet=pet;self.is_completion=completion;self.item={};self.setFixedWidth(380)
         box=QVBoxLayout(self);box.setContentsMargins(18,15,18,16);box.setSpacing(8)
         self.title=QLabel("Codex 已完成工作");self.title.setStyleSheet("font-size:15px;font-weight:600;color:#ffc5de;")
         self.subtitle=QLabel();self.subtitle.setTextFormat(Qt.PlainText);self.subtitle.setObjectName("muted")
-        self.detail=QLabel("我在这里等你来查看。\n摸摸头也能切回 Codex。");self.detail.setObjectName("muted")
-        self.go=QPushButton("前往查看");self.go.clicked.connect(pet.review_completion)
+        self.detail=QLabel();self.detail.setTextFormat(Qt.PlainText);self.detail.setWordWrap(True);self.detail.setStyleSheet('font-size:13px;color:#e7e1f1;line-height:1.5;')
+        self.go=QPushButton("前往查看");self.go.clicked.connect(lambda:pet.review_completion(self.item) if self.is_completion else pet.open_report_task(self.item))
         self.error=QLabel();self.error.setWordWrap(True);self.error.setStyleSheet("color:#ffc5de;font-size:11px;");self.error.hide()
         for widget in (self.title,self.subtitle,self.detail,self.go,self.error):box.addWidget(widget)
+        self.expiry=QTimer(self);self.expiry.setSingleShot(True);self.expiry.timeout.connect(self.expire)
+
+    def expire(self):
+        if self.underMouse():self.expiry.start(4000)
+        else:self.hide()
+
+    def present_report(self,item):
+        changed=(self.item.get('thread_id'),self.item.get('turn_id'),self.item.get('summary'))!=(item.get('thread_id'),item.get('turn_id'),item.get('summary'))
+        self.item=item.copy();kind=item.get('kind','completed')
+        names={'completed':'Codex 已完成工作','progress':'Codex 工作进展'}
+        self.title.setText(names.get(kind,'Codex 工作报告'))
+        self.subtitle.setText(display_title(item['title'],32));self.subtitle.setToolTip(item['title'])
+        summary=item.get('summary') if self.pet.settings['work_reports'] else ''
+        self.detail.setText(excerpt(summary,320) or '摸摸头或前往查看，打开对应 Codex 任务。')
+        if changed:self.error.hide()
+        self.adjustSize();self.beside(self.pet)
+        if self.pet.isVisible():self.show()
+        if kind=='progress':self.expiry.start(14000)
+        else:self.expiry.stop()
+        return True
 
     def present(self):
         latest=self.pet.reminder.latest
         if not latest:return
         count=len(self.pet.reminder.items)
+        if not self.present_report(latest):return
         self.title.setText("Codex 已完成工作" if count==1 else f"Codex · {count} 个任务待查看")
-        self.subtitle.setText(display_title(latest['title'],27));self.subtitle.setToolTip(latest['title'])
         self.go.setText("前往查看" if count==1 else f"前往查看 · 还有 {count} 项")
-        self.adjustSize();self.beside(self.pet)
-        if self.pet.isVisible():self.show()
 
 class SettingsDialog(QDialog):
     def __init__(self,pet):
@@ -302,7 +324,7 @@ class SettingsDialog(QDialog):
         title=QLabel("陪伴偏好");title.setObjectName("heading");box.addWidget(title)
         subtitle=QLabel("留一点可爱，其他交给你决定。");subtitle.setObjectName("muted");box.addWidget(subtitle)
         self.checks={}
-        for key,label in (("gaze","仅在持续移动鼠标时跟随视线"),("auto_idle","空闲时随机做小动作"),("hover_quota","悬停时显示 Codex 额度"),("task_activity","显示思考 / 工作动画与下方状态"),("task_notifications","任务开始、完成、中止时提示"),("sound","完成后重复播放提示音，直到前往查看")):
+        for key,label in (("gaze","仅在持续移动鼠标时跟随视线"),("auto_idle","空闲时随机做小动作"),("hover_quota","悬停时显示 Codex 额度"),("task_activity","显示思考 / 工作动画与下方状态"),("task_notifications","显示阶段进展与完成通知"),("work_reports","在卡片显示工作结果摘录"),("progress_reports","工作中显示简短阶段进展（最多每 10 秒一次）"),("sound","完成后重复播放提示音，直到前往查看")):
             control=QCheckBox(label);control.setChecked(pet.settings[key])
             control.toggled.connect(lambda value,k=key:pet.set_setting(k,value))
             box.addWidget(control)
@@ -375,6 +397,9 @@ class PetWindow(QWidget):
         self.popup=QuotaPopup(self)
         self.notice=NoticePopup(self)
         self.completion=CompletionPopup(self)
+        self.work_popup=CompletionPopup(self,completion=False)
+        self.last_work_report=None;self.last_progress_at=0
+        self.recent_tasks=[]
         self.notice.timer.timeout.connect(self.show_quota)
         self.reminder_timer=QTimer(self);self.reminder_timer.setInterval(8000);self.reminder_timer.timeout.connect(self.remind_completion)
         self.resize_pet();self.restore_position()
@@ -549,6 +574,10 @@ class PetWindow(QWidget):
             self.dialog.volume_label.setText(f"提示音量：{round(self.settings['sound_volume'])}%")
         if key=='sound_volume':self.sound_effect.setVolume(value/100)
         if key=='sound' and not value:self.sound_effect.stop()
+        if key=='work_reports':
+            if self.completion.isVisible():self.completion.present()
+            if self.work_popup.isVisible():self.work_popup.present_report(self.work_popup.item)
+        if key=='progress_reports' and not value and self.work_popup.item.get('kind')=='progress':self.work_popup.hide()
         if key in ("scale","task_activity"):self.resize_pet();self.animate()
         if key=="hover_quota" and not value:self.popup.hide();self.hover_timer.stop()
         if key=="auto_idle":
@@ -566,17 +595,18 @@ class PetWindow(QWidget):
         self.dialog.show();self.dialog.raise_();self.dialog.activateWindow()
 
     def context_menu(self,point):
-        self.menu_open=True;self.popup.hide();self.notice.hide();self.completion.hide();self.hover_timer.stop()
+        self.menu_open=True;self.popup.hide();self.notice.hide();self.completion.hide();self.work_popup.hide();self.hover_timer.stop()
         menu=QMenu(self);menu.setStyleSheet(STYLE)
         for key,label in (("gaze","鼠标视线跟随"),("auto_idle","空闲随机动画"),("hover_quota","悬停查看额度"),("task_activity","思考 / 工作动画与状态"),("task_notifications","任务庆祝与提示")):
             item=menu.addAction(label);item.setCheckable(True);item.setChecked(self.settings[key])
             item.triggered.connect(lambda value,k=key:self.set_setting(k,value))
-        menu.addSeparator();settings_action=menu.addAction("设置");menu.addAction("重新居中",self.recenter)
+        menu.addSeparator();report_action=menu.addAction('工作报告');settings_action=menu.addAction("设置");menu.addAction("重新居中",self.recenter)
         menu.addAction("暂时隐藏",self.hide_pet if self.tray else lambda:None);menu.addAction("退出",self.shutdown)
         selected=menu.exec(point)
         self.menu_open=False;self.hover_block_until=time.monotonic()+.5;self.scheduler.touch(time.monotonic())
         if self.reminder.latest:self.completion.present()
         if selected==settings_action:self.open_settings()
+        elif selected==report_action:self.show_work_report()
         menu.deleteLater()
 
     def recenter(self):
@@ -605,13 +635,14 @@ class PetWindow(QWidget):
     def remind_completion(self):
         if not self.reminder.latest:self.reminder_timer.stop();return
         self.popup.hide();self.notice.hide();self.notice.timer.stop();self.hover_timer.stop()
-        if not self.menu_open:self.completion.present()
+        if not self.menu_open:
+            self.work_popup.hide();self.completion.present()
         self.action('celebrate',4.2,priority=100)
         self.play_completion_sound()
         if not self.reminder_timer.isActive():self.reminder_timer.start()
 
-    def review_completion(self):
-        item=self.reminder.latest
+    def review_completion(self,item=None):
+        item=item or self.reminder.latest
         if not item or self.review_in_progress:return
         item=item.copy();self.review_in_progress=True;self.completion.go.setEnabled(False);self.completion.error.hide()
         def finish(success):
@@ -633,9 +664,34 @@ class PetWindow(QWidget):
             else:finish(False)
         QTimer.singleShot(350,focus_attempt)
 
+    def open_report_task(self,item):
+        if not item:return
+        latest=self.reminder.latest
+        if latest and (latest['thread_id'],latest['turn_id'])==(item['thread_id'],item.get('turn_id')):
+            self.review_completion();return
+        if self.completion_opener is not None:
+            success=bool(self.completion_opener(item['thread_id']))
+            if not success:self.work_popup.error.setText('未能打开对应 Codex 任务，请重试。');self.work_popup.error.show()
+            return
+        try:accepted=QDesktopServices.openUrl(QUrl(thread_url(item['thread_id'])))
+        except (ValueError,OSError):accepted=False
+        if not accepted:self.work_popup.error.setText('未能打开对应 Codex 任务，请重试。');self.work_popup.error.show();return
+        QTimer.singleShot(350,focus_codex)
+
+    def show_work_report(self):
+        if self.reminder.latest:self.completion.present();return
+        item=self.last_work_report
+        if not item and self.recent_tasks:
+            tid,title=self.recent_tasks[0]
+            item={'thread_id':tid,'title':title,'turn_id':'','kind':'progress','summary':'暂未收到新的阶段报告，可以前往 Codex 查看此任务。'}
+        if item:
+            self.popup.hide();self.work_popup.present_report(item);self.work_popup.expiry.stop()
+        else:self.notice.present('暂无工作报告','等待本机 Codex 的下一步消息。')
+
     def on_tasks(self,snapshot):
         previously=self.activity_visible()
         self.task_status=snapshot["status"];self.active_tasks=snapshot["active"]
+        self.recent_tasks=snapshot.get('recent_tasks',self.recent_tasks)
         phase=snapshot.get("phase") if self.active_tasks else None
         if phase!=self.activity_phase:
             self.activity_phase=phase;self.activity_started=time.monotonic()
@@ -644,22 +700,28 @@ class PetWindow(QWidget):
             completions=[e for e in snapshot["events"] if e.kind=="completed"]
             if completions:
                 fresh=False
-                for e in completions:fresh=self.reminder.add(e.thread_id,e.turn_id,e.title) or fresh
+                self.work_popup.hide()
+                for e in completions:
+                    fresh=self.reminder.add(e.thread_id,e.turn_id,e.title,summary=e.summary) or fresh
+                    self.last_work_report={'thread_id':e.thread_id,'title':e.title,'turn_id':e.turn_id,'kind':'completed','summary':e.summary}
                 title="Codex 任务完成啦" if len(completions)==1 else f"{len(completions)} 个 Codex 任务完成啦"
                 if fresh:
                     self.remind_completion()
-                    if self.tray:self.tray.showMessage(title,display_title(completions[-1].title,72),QSystemTrayIcon.Information,6000)
-            for e in snapshot["events"]:
-                if e.kind=="started" and not completions and not self.reminder.latest:
-                    self.notice.present("Codex 开始任务啦",e.title,3000)
-                elif e.kind=="aborted" and not completions and not self.reminder.latest:
-                    self.action("failed",1.8,priority=60);self.notice.present("Codex 任务已中止",e.title,4000)
+                    if self.tray:self.tray.showMessage(title,excerpt(completions[-1].summary,220) or display_title(completions[-1].title,72),QSystemTrayIcon.Information,6000)
+            progress=[e for e in snapshot['events'] if e.kind=='progress']
+            if progress:
+                e=progress[-1]
+                item={'thread_id':e.thread_id,'title':e.title,'turn_id':e.turn_id,'kind':'progress','summary':e.summary}
+                self.last_work_report=item
+                now=time.monotonic()
+                if self.settings['progress_reports'] and self.settings['work_reports'] and not self.reminder.latest and now-self.last_progress_at>=10 and not self.menu_open:
+                    self.last_progress_at=now;self.popup.hide();self.work_popup.present_report(item)
         self.popup.refresh_view()
         self.animate()
         if self.tray:self.tray.setToolTip("爱弥斯 · "+self.task_status)
 
     def hide_pet(self):
-        self.popup.hide();self.notice.hide();self.completion.hide();self.hide()
+        self.popup.hide();self.notice.hide();self.completion.hide();self.work_popup.hide();self.hide()
 
     def show_pet(self):
         self.ensure_visible();self.show();self.raise_()
@@ -672,7 +734,7 @@ class PetWindow(QWidget):
 
     def shutdown(self):
         self.timer.stop();self.save_timer.stop();self.popup_timer.stop();self.hover_timer.stop();self.close_hover.stop();self.reminder_timer.stop()
-        self.sound_effect.stop();self.save();self.popup.hide();self.notice.hide();self.completion.hide()
+        self.sound_effect.stop();self.save();self.popup.hide();self.notice.hide();self.completion.hide();self.work_popup.close()
         if self.worker:self.worker.stop();self.worker=None
         if self.input_observer:self.input_observer.close();self.input_observer=None
         if self.tray:self.tray.hide()
@@ -702,7 +764,7 @@ def main():
     if args.diagnostic_output:
         def diagnostics():
             folder=args.diagnostic_output;folder.mkdir(parents=True,exist_ok=True)
-            report={"platform":app.platformName(),"task_status":pet.task_status,"activity_phase":pet.activity_phase,"activity_text":pet.activity_text() if pet.activity_visible() else "","rendered_kind":pet.rendered_kind,"active_count":len(pet.active_tasks),"quota":pet.quota,"quota_error":pet.quota_error,"gaze_direction":pet.gaze_previous,"gaze_activity":pet.gaze_activity.reason,"cursor_visible":pet.input_state.cursor_visible,"fullscreen":pet.input_state.fullscreen,"keyboard_observer_ready":bool(pet.input_observer and pet.input_observer.keyboard_ready),"pending_completions":len(pet.reminder.items),"sound_volume":pet.settings['sound_volume'],"audio_ready":pet.sound_effect.status()==QSoundEffect.Ready,"settings_visible":bool(pet.dialog and pet.dialog.isVisible()),"settings_on_top":bool(pet.dialog and pet.dialog.windowFlags()&Qt.WindowStaysOnTopHint),"visible":pet.isVisible(),"size":[pet.width(),pet.height()],"permanent_buttons":sum(b.window() is pet for b in pet.findChildren(QPushButton)),"version":"0.4.0"}
+            report={"platform":app.platformName(),"task_status":pet.task_status,"activity_phase":pet.activity_phase,"activity_text":pet.activity_text() if pet.activity_visible() else "","rendered_kind":pet.rendered_kind,"active_count":len(pet.active_tasks),"quota":pet.quota,"quota_error":pet.quota_error,"gaze_direction":pet.gaze_previous,"gaze_activity":pet.gaze_activity.reason,"cursor_visible":pet.input_state.cursor_visible,"fullscreen":pet.input_state.fullscreen,"keyboard_observer_ready":bool(pet.input_observer and pet.input_observer.keyboard_ready),"pending_completions":len(pet.reminder.items),"sound_volume":pet.settings['sound_volume'],"audio_ready":pet.sound_effect.status()==QSoundEffect.Ready,"settings_visible":bool(pet.dialog and pet.dialog.isVisible()),"settings_on_top":bool(pet.dialog and pet.dialog.windowFlags()&Qt.WindowStaysOnTopHint),"visible":pet.isVisible(),"size":[pet.width(),pet.height()],"permanent_buttons":sum(b.window() is pet for b in pet.findChildren(QPushButton)),"version":"0.5.1","work_reports_enabled":pet.settings['work_reports'],"notifications_only":True,"report_card_visible":pet.work_popup.isVisible()}
             (folder/"runtime.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
             pet.grab().save(str(folder/"pet-running.png"))
             pet.popup.refresh_view();pet.popup.grab().save(str(folder/"quota-popup.png"))

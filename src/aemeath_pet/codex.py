@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 
 import psutil
+from .reports import ReportCollector
 
 def codex_home():
     return Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
@@ -82,7 +83,7 @@ class AccountRPC:
                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
                 threading.Thread(target=self._reader, args=(self.process,), daemon=True).start()
                 self._call("initialize", {
-                    "clientInfo": {"name": "aemeath-pet", "title": "Aemeath Pet", "version": "0.4.0"},
+                    "clientInfo": {"name": "aemeath-pet", "title": "Aemeath Pet", "version": "0.5.1"},
                     "capabilities": {"experimentalApi": True},
                 })
                 self.process.stdin.write('{"method":"initialized"}\n')
@@ -140,6 +141,7 @@ class TaskEvent:
     title: str
     kind: str
     turn_id: str
+    summary: str = ''
 
 class RolloutReader:
     """Retain lifecycle/item types and call IDs, never message/reasoning content.
@@ -156,11 +158,15 @@ class RolloutReader:
         self.phase = None
         self.phase_at = ""
         self.pending_calls = set()
+        self.report_collector = ReportCollector()
+        self.reports = []
+        self.completion_summaries = {}
 
     def observe_item(self, payload, stamp=""):
         if not self.active or not isinstance(payload, dict):
             return
         kind = payload.get("type")
+        self.report_collector.observe(payload)
         call = payload.get("call_id")
         if kind in ("function_call", "custom_tool_call") and call:
             self.pending_calls.add(call)
@@ -175,6 +181,7 @@ class RolloutReader:
 
     def poll(self):
         events = []
+        self.reports = []
         if not self.path.exists():
             return events
         if self.path.stat().st_size < self.offset:
@@ -215,9 +222,14 @@ class RolloutReader:
                     self.seen.add((turn, kind))
                     if kind == "started":
                         self.active = turn
+                        self.report_collector.start(turn)
                         self.pending_calls.clear(); self.phase = "thinking"
                         self.phase_at = raw.get("timestamp", "")
                     elif self.active == turn:
+                        if kind == 'completed':
+                            report=self.report_collector.complete(payload.get('last_agent_message',''))
+                            self.completion_summaries[turn]=report.text
+                            if len(self.completion_summaries)>20:self.completion_summaries.pop(next(iter(self.completion_summaries)))
                         self.active = None
                         self.pending_calls.clear(); self.phase = None
                     if not bootstrap:
@@ -225,6 +237,8 @@ class RolloutReader:
                 except (ValueError, TypeError, AttributeError):
                     continue
         self.initialized = True
+        if not bootstrap:self.reports=list(self.report_collector.events)
+        self.report_collector.events.clear()
         return events
 
 class TaskMonitor:
@@ -237,6 +251,7 @@ class TaskMonitor:
         self.error = ""
         self.phase = None
         self.phases = {}
+        self.recent_tasks = []
 
     def poll(self):
         self.phase = None; self.phases = {}
@@ -255,7 +270,9 @@ class TaskMonitor:
                 cols = {r[1] for r in db.execute("pragma table_info(threads)")}
                 # Exclude automatic agents; accept old migrated desktop records.
                 origin = " AND (originator IS NULL OR originator IN ('Codex Desktop','codex_work_desktop'))" if "originator" in cols else ""
-                rows = list(db.execute("SELECT id,title,rollout_path FROM threads WHERE archived=0 AND source='vscode' AND agent_path IS NULL" + origin + " ORDER BY updated_at DESC LIMIT 20"))
+                title="COALESCE(NULLIF(name,''),title) AS title" if 'name' in cols else 'title'
+                rows = list(db.execute("SELECT id,"+title+",rollout_path FROM threads WHERE archived=0 AND source='vscode' AND agent_path IS NULL" + origin + " ORDER BY updated_at DESC LIMIT 20"))
+            self.recent_tasks=[(row['id'],row['title'] or 'Codex 任务') for row in rows]
             ids = {row["id"] for row in rows}
             self.readers = {k:v for k,v in self.readers.items() if k in ids}
             for row in rows:
@@ -268,7 +285,9 @@ class TaskMonitor:
                 reader = self.readers[tid]
                 was_new = not reader.initialized
                 for kind, turn in reader.poll():
-                    events.append(TaskEvent(tid, self.titles[tid], kind, turn))
+                    events.append(TaskEvent(tid, self.titles[tid], kind, turn,reader.completion_summaries.get(turn,'')))
+                for report in reader.reports:
+                    events.append(TaskEvent(tid,self.titles[tid],report.kind,report.turn_id,report.text))
                 # A historical interrupted session can lack an ending marker.
                 # Do not announce it as running on startup without a live writer
                 # or recent activity. Never manufacture a completion event.

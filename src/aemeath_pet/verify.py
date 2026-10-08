@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtGui import QCursor, QEnterEvent
-from PySide6.QtWidgets import QPushButton, QApplication, QMenu
+from PySide6.QtWidgets import QPushButton, QApplication, QMenu, QLineEdit, QPlainTextEdit
 from PySide6.QtMultimedia import QSoundEffect
 from PySide6.QtTest import QTest
 from .app import PetWindow
@@ -145,7 +145,27 @@ def smoke_test(app,output):
     pet.save();raw=json.loads(pet.statefile.read_text(encoding="utf-8"))
     assert "care" not in raw and raw["version"]==2
     checks["ui_flows"]=["no persistent buttons","sustained-motion gaze","stationary/hidden/fullscreen/typing restores idle","headpat","hover quota","thinking/workbench","completion remains pending","new task cannot erase reminder","failed navigation retains reminder","go button acknowledges after navigation","headpat navigates and acknowledges","right-menu opens settings on top","volume control and preview","settings migration"]
+    pet.dialog.close();pet.settings['sound']=False;pet.director.until=0
+    pet.on_tasks({'status':'Codex 已打开 · 空闲','active':[],'events':[TaskEvent('report-test','桌宠通知升级','completed','report-turn','已修复设置窗口，并加入音量调节。28 项测试通过。需要你试听提示音。')]})
+    app.processEvents()
+    assert '音量调节' in pet.completion.detail.text()
+    assert not hasattr(pet.completion,'reply') and not hasattr(pet.completion,'send_button')
+    assert not pet.completion.findChildren(QLineEdit) and not pet.completion.findChildren(QPlainTextEdit)
+    assert pet.completion.findChildren(QPushButton)==[pet.completion.go]
+    pet.completion.grab().save(str(output/'work-report-completed.png'))
+    QTest.mouseClick(pet.completion.go,Qt.LeftButton)
+    assert opened[-1]=='report-test' and not pet.reminder.latest
+    pet.on_tasks({'status':'1 个任务进行中','active':[('progress-test','检查通知设置')],'phase':'working','events':[TaskEvent('progress-test','检查通知设置','progress','progress-turn','设置已检查完成，接下来验证声音与窗口显示。')]})
+    app.processEvents();assert pet.work_popup.isVisible()
+    assert pet.work_popup.expiry.isActive()
+    assert pet.work_popup.findChildren(QPushButton)==[pet.work_popup.go]
+    assert not pet.work_popup.findChildren(QPlainTextEdit)
+    pet.work_popup.grab().save(str(output/'work-report-progress.png'))
+    QTest.mouseClick(pet.work_popup.go,Qt.LeftButton)
+    assert opened[-1]=='progress-test'
+    assert 'quick_reply' not in pet.dialog.checks and 'quick_reply' not in pet.settings
+    checks['report_flows']=['final response excerpt','completed card opens corresponding task','progress excerpt and expiry','progress card opens corresponding task','no reply fields or copying controls','no reply setting']
     (output/"verification.json").write_text(json.dumps(checks,ensure_ascii=False,indent=2),encoding="utf-8")
-    pet.dialog.close();pet.popup.close();pet.notice.close();pet.completion.close();pet.hide()
+    pet.dialog.close();pet.popup.close();pet.notice.close();pet.completion.close();pet.work_popup.close();pet.hide()
     for timer in (pet.timer,pet.save_timer,pet.popup_timer,pet.hover_timer,pet.close_hover,pet.reminder_timer):timer.stop()
     return 0
